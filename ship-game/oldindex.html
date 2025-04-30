@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Jogo de Navios 3D</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+    }
+
+    #coords {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      font-family: sans-serif;
+    }
+
+    #menu {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.8);
+      padding: 20px;
+      border-radius: 8px;
+      color: white;
+      font-family: sans-serif;
+    }
+
+    #menu input,
+    #menu button {
+      padding: 5px;
+      font-size: 1em;
+    }
+
+    .ship-label,
+    .island-label {
+      position: absolute;
+      transform: translate(-50%, -100%);
+      pointer-events: none;
+      font-family: sans-serif;
+      font-weight: bold;
+      color: white;
+      text-shadow: 0 0 5px black;
+    }
+
+    .island-label {
+      background: rgba(0, 0, 0, 0.5);
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-weight: normal;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="menu">
+    <label for="nameInput">Digite seu nome:</label>
+    <input id="nameInput" type="text" placeholder="Seu nome" />
+    <button id="startBtn">Iniciar</button>
+  </div>
+  <div id="coords">X: 0, Z: 0</div>
+  <div id="islandLabels"></div>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+  <script>
+    const STORAGE_KEY_DATA = 'islandData';
+    const STORAGE_KEY_CHUNKS = 'generatedChunks';
+    const CHUNK_SIZE = 100;
+    const VIEW_DISTANCE = 2;
+    const NAME_DIST = 3;
+    const BIOMES = [
+      { name: 'Jungle', color: 0x228B22 },
+      { name: 'Desert', color: 0xC2B280 },
+      { name: 'Snow', color: 0xFFFFFF },
+      { name: 'Volcano', color: 0x8B0000 }
+    ];
+    let islandData = {};
+    let generatedChunks = new Set();
+    let loadedChunks = new Set();
+    const move = { f: 0, b: 0, l: 0, r: 0 };
+    let playerName = '';
+    function loadData() {
+      try { JSON.parse(localStorage.getItem(STORAGE_KEY_DATA))?.forEach(i => islandData[i.id] = i); } catch { }
+      try { JSON.parse(localStorage.getItem(STORAGE_KEY_CHUNKS))?.forEach(c => generatedChunks.add(c)); } catch { }
+    }
+    function saveData() {
+      localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(Object.values(islandData)));
+      localStorage.setItem(STORAGE_KEY_CHUNKS, JSON.stringify([...generatedChunks]));
+    }
+    function getChunkKey(x, z) { return `${x}_${z}` }
+    function generateChunk(cx, cz) {
+      const key = getChunkKey(cx, cz);
+      if (generatedChunks.has(key)) return;
+      generatedChunks.add(key);
+      for (let i = 0, c = 3 + Math.floor(Math.random() * 4); i < c; i++) {
+        const x = cx * CHUNK_SIZE + Math.random() * CHUNK_SIZE;
+        const z = cz * CHUNK_SIZE + Math.random() * CHUNK_SIZE;
+        const id = `${Math.round(x)}_${Math.round(z)}`;
+        if (islandData[id]) continue;
+        const biome = BIOMES[Math.floor(Math.random() * BIOMES.length)].name;
+        islandData[id] = { id, pos: { x, y: 1, z }, biome, size: 5 + Math.random() * 5, name: null, chunk: key };
+      }
+      saveData();
+    }
+    function addIslandMesh(d) {
+      const b = BIOMES.find(b => b.name === d.biome);
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(0, d.size, 2, 8), new THREE.MeshStandardMaterial({ color: b.color }));
+      m.position.set(d.pos.x, d.pos.y, d.pos.z);
+      m.userData.id = d.id;
+      scene.add(m);
+      d.mesh = m;
+      if (d.name) createLabel(d);
+    }
+    function removeIslandMesh(d) {
+      if (d.mesh) { scene.remove(d.mesh); d.mesh.geometry.dispose(); d.mesh.material.dispose(); delete d.mesh }
+      if (d.label) { d.label.remove(); delete d.label }
+    }
+    function createLabel(d) {
+      const div = document.createElement('div'); div.className = 'island-label'; div.innerText = d.name;
+      document.getElementById('islandLabels').appendChild(div);
+      d.label = div;
+    }
+    function updateChunks() {
+      if (!ship) return;
+      const cx = Math.floor(ship.position.x / CHUNK_SIZE), cz = Math.floor(ship.position.z / CHUNK_SIZE);
+      const needed = new Set();
+      for (let dx = -VIEW_DISTANCE; dx <= VIEW_DISTANCE; dx++)for (let dz = -VIEW_DISTANCE; dz <= VIEW_DISTANCE; dz++) {
+        const key = getChunkKey(cx + dx, cz + dz);
+        needed.add(key);
+        if (!generatedChunks.has(key)) generateChunk(cx + dx, cz + dz);
+        if (!loadedChunks.has(key)) {
+          Object.values(islandData).filter(i => i.chunk === key).forEach(addIslandMesh);
+          loadedChunks.add(key);
+        }
+      }
+      for (const key of [...loadedChunks]) if (!needed.has(key)) {
+        Object.values(islandData).filter(i => i.chunk === key).forEach(removeIslandMesh);
+        loadedChunks.delete(key);
+      }
+    }
+    let scene, camera, renderer, ship, shipLabel;
+    function init() {
+      loadData();
+      scene = new THREE.Scene(); scene.background = new THREE.Color(0x87ceeb);
+      camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 1000);
+      renderer = new THREE.WebGLRenderer({ antialias: true }); renderer.setSize(innerWidth, innerHeight); document.body.appendChild(renderer.domElement);
+      ship = new THREE.Mesh(new THREE.BoxGeometry(1, 0.5, 3), new THREE.MeshStandardMaterial({ color: 0x555555 }));
+      ship.position.y = 0.25; scene.add(ship);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1));
+      const dl = new THREE.DirectionalLight(0xffffff, 0.8); dl.position.set(-100, 100, -100); scene.add(dl);
+      const water = new THREE.Mesh(new THREE.PlaneGeometry(1000, 1000), new THREE.MeshStandardMaterial({ color: 0x1e90ff }));
+      water.rotation.x = -Math.PI / 2; scene.add(water);
+      shipLabel = document.createElement('div'); shipLabel.className = 'ship-label'; document.body.appendChild(shipLabel);
+      shipLabel.style.display = 'none';
+      window.addEventListener('keydown', e => { if (e.code === 'ArrowUp') move.f = 1; if (e.code === 'ArrowDown') move.b = 1; if (e.code === 'ArrowLeft') move.l = 1; if (e.code === 'ArrowRight') move.r = 1; });
+      window.addEventListener('keyup', e => { if (e.code === 'ArrowUp') move.f = 0; if (e.code === 'ArrowDown') move.b = 0; if (e.code === 'ArrowLeft') move.l = 0; if (e.code === 'ArrowRight') move.r = 0; });
+      document.getElementById('startBtn').onclick = () => { const v = document.getElementById('nameInput').value.trim(); if (!v) return; playerName = v; document.getElementById('menu').style.display = 'none'; shipLabel.style.display = ''; };
+      window.addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+    }
+    function animate() {
+      requestAnimationFrame(animate);
+      if (!ship) return;
+      if (move.f) ship.translateZ(0.2); if (move.b) ship.translateZ(-0.1); if (move.l) ship.rotation.y += 0.03; if (move.r) ship.rotation.y -= 0.03;
+      updateChunks();
+      Object.values(islandData).forEach(d => {
+        if (d.name) return;
+        const dx = d.pos.x - ship.position.x, dz = d.pos.z - ship.position.z;
+        if (Math.hypot(dx, dz) < NAME_DIST) { const n = prompt(`Nome para ilha (${d.biome}):`); if (n) { d.name = n; saveData(); removeIslandMesh(d); addIslandMesh(d); } }
+      });
+      const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir);
+      Object.values(islandData).forEach(d => {
+        if (d.name && d.mesh && d.label) {
+          const proj = d.mesh.position.clone().project(camera);
+          const toIsland = d.mesh.position.clone().sub(camera.position).normalize();
+          const vis = camDir.dot(toIsland) > 0 && proj.x >= -1 && proj.x <= 1 && proj.y >= -1 && proj.y <= 1;
+          d.label.style.display = vis ? '' : 'none';
+          if (vis) { d.label.style.left = `${(proj.x + 1) / 2 * innerWidth}px`; d.label.style.top = `${(-proj.y + 1) / 2 * innerHeight}px`; }
+        }
+      });
+      if (playerName) { const p = ship.position.clone().project(camera); shipLabel.innerText = playerName; shipLabel.style.left = `${(p.x + 1) / 2 * innerWidth}px`; shipLabel.style.top = `${(-p.y + 1) / 2 * innerHeight}px`; }
+      document.getElementById('coords').innerText = `X: ${ship.position.x.toFixed(1)}, Z: ${ship.position.z.toFixed(1)}`;
+      const camPos = ship.localToWorld(new THREE.Vector3(0, 5, -12)); camera.position.lerp(camPos, 0.1); camera.lookAt(ship.position);
+      renderer.render(scene, camera);
+    }
+    init(); animate();
+  </script>
+</body>
+
+</html>
