@@ -28,31 +28,38 @@ export class IslandGenerator {
         }
 
         try {
+            // Create a group to hold all island components (terrain, ads, decorations)
+            const islandGroup = new THREE.Group();
+            islandGroup.userData.id = islandData.id;
+            islandGroup.position.set(islandData.pos.x, 0, islandData.pos.z);
+            
             // Create procedural island mesh
-            const mesh = this.createProceduralIslandMesh(islandData, biome);
+            const terrainMesh = this.createProceduralIslandMesh(islandData, biome);
             
             // Validate mesh geometry to avoid NaN errors
-            if (!this.validateMeshGeometry(mesh)) {
+            if (!this.validateMeshGeometry(terrainMesh)) {
                 console.error(`Invalid mesh geometry for island: ${islandData.id}, using fallback`);
                 // Create a simple fallback mesh
                 const fallbackGeometry = new THREE.CylinderGeometry(0, islandData.size, islandData.size * 0.8, 8);
-                mesh.geometry = fallbackGeometry;
-                mesh.geometry.computeVertexNormals();
-                mesh.geometry.computeBoundingSphere();
+                terrainMesh.geometry = fallbackGeometry;
+                terrainMesh.geometry.computeVertexNormals();
+                terrainMesh.geometry.computeBoundingSphere();
             }
             
-            // Always position at sea level (y=0) to fix buggy positions
-            mesh.position.set(islandData.pos.x, 0, islandData.pos.z);
-            mesh.userData.id = islandData.id;
+            // Add terrain mesh to the group (position at origin since the group is positioned)
+            terrainMesh.position.set(0, 0, 0);
+            islandGroup.add(terrainMesh);
             
-            // Add to scene
-            this.scene.add(mesh);
-            islandData.mesh = mesh;
-            
-            // If this is an ad island, add the outdoor advertisement on top of it
+            // If this is an ad island, add the outdoor advertisement components to the group
             if (islandData.outdoor && islandData.outdoor.active) {
-                this.addOutdoorToIsland(islandData);
+                this.addOutdoorToIsland(islandData, islandGroup);
             }
+            
+            // Add the complete island group to the scene
+            this.scene.add(islandGroup);
+            
+            // Store reference to the island group
+            islandData.mesh = islandGroup;
         } catch (error) {
             console.error(`Failed to create island mesh for ${islandData.id}:`, error);
         }
@@ -62,32 +69,23 @@ export class IslandGenerator {
         // Clean up mesh
         if (islandData.mesh) {
             try {
-                // Also remove any attached billboard objects from the island
-                islandData.mesh.children.forEach(child => {
-                    if (child.userData.isOutdoor) {
-                        if (child instanceof THREE.Mesh) {
-                            if (child.material instanceof THREE.Material) {
-                                child.material.dispose();
-                            } else if (Array.isArray(child.material)) {
-                                child.material.forEach((m: THREE.Material) => m.dispose());
-                            }
+                // Remove the entire group from the scene
+                this.scene.remove(islandData.mesh);
+                
+                // Recursively dispose of all child meshes and their materials
+                islandData.mesh.traverse((child) => {
+                    if (child instanceof THREE.Mesh) {
+                        if (child.geometry) {
                             child.geometry.dispose();
+                        }
+                        
+                        if (child.material instanceof THREE.Material) {
+                            child.material.dispose();
+                        } else if (Array.isArray(child.material)) {
+                            child.material.forEach((m: THREE.Material) => m.dispose());
                         }
                     }
                 });
-                
-                this.scene.remove(islandData.mesh);
-                
-                // Properly dispose of geometries and materials
-                if (islandData.mesh.geometry) {
-                    islandData.mesh.geometry.dispose();
-                }
-                
-                if (islandData.mesh.material instanceof THREE.Material) {
-                    islandData.mesh.material.dispose();
-                } else if (Array.isArray(islandData.mesh.material)) {
-                    islandData.mesh.material.forEach((m: THREE.Material) => m.dispose());
-                }
                 
                 delete islandData.mesh;
             } catch (error) {
@@ -96,14 +94,24 @@ export class IslandGenerator {
         }
     }
 
-    private addOutdoorToIsland(islandData: IslandData): void {
-        if (!islandData.mesh || !islandData.outdoor) return;
+    private addOutdoorToIsland(islandData: IslandData, islandGroup: THREE.Group): void {
+        if (!islandData.outdoor) return;
         
         try {
             const adRank = islandData.outdoor.adRank || 1; // Default to lowest rank if not specified
             
+            // Find the terrain mesh to enhance it
+            let terrainMesh: THREE.Mesh | null = null;
+            islandGroup.traverse((child) => {
+                if (child instanceof THREE.Mesh && !child.userData.isOutdoor) {
+                    terrainMesh = child;
+                }
+            });
+            
             // Make ad islands visibly distinct based on their rank
-            this.enhanceAdIslandMesh(islandData.mesh, adRank);
+            if (terrainMesh) {
+                this.enhanceAdIslandMesh(terrainMesh, adRank);
+            }
             
             // Create billboard geometry - scale based on island size and ad rank
             // Higher ranked ads get slightly larger billboards
@@ -137,8 +145,8 @@ export class IslandGenerator {
             billboard.userData.islandId = islandData.id;
             billboard.userData.adRank = adRank;
             
-            // Add the billboard as a child of the island mesh
-            islandData.mesh.add(billboard);
+            // Add the billboard to the island group
+            islandGroup.add(billboard);
             
             // Store reference to billboard for easier access
             islandData.outdoor.billboard = billboard;
@@ -149,12 +157,12 @@ export class IslandGenerator {
             // Add a marker/pedestal on the island to make it more visible
             // Skip for low-ranked ads to improve performance
             if (adRank >= 3) {
-                this.addAdMarkerToPedestal(islandData, adRank);
+                this.addAdMarkerToPedestal(islandData, adRank, islandGroup);
             }
             
             // Only add high-tier decorations if rank is high enough (improved performance)
             if (adRank >= 7) {
-                this.addHighTierDecorations(islandData, adRank);
+                this.addHighTierDecorations(islandData, adRank, islandGroup);
             }
             
         } catch (error) {
@@ -206,9 +214,7 @@ export class IslandGenerator {
         }
     }
 
-    private addAdMarkerToPedestal(islandData: IslandData, adRank: number): void {
-        if (!islandData.mesh) return;
-        
+    private addAdMarkerToPedestal(islandData: IslandData, adRank: number, islandGroup: THREE.Group): void {
         // Create a pedestal/platform on the island - size varies by rank
         const pedestalHeight = islandData.size * (0.4 + (adRank / 50)); // Higher rank, taller pedestal
         
@@ -238,13 +244,11 @@ export class IslandGenerator {
         // Position it on top of the island, slightly raised to always be visible
         pedestal.position.set(0, islandData.size * 0.3, 0);
         
-        // Add to the island
-        islandData.mesh.add(pedestal);
+        // Add the pedestal to the island group
+        islandGroup.add(pedestal);
     }
 
-    private addHighTierDecorations(islandData: IslandData, adRank: number): void {
-        if (!islandData.mesh) return;
-        
+    private addHighTierDecorations(islandData: IslandData, adRank: number, islandGroup: THREE.Group): void {
         // Add decorative pillars for high-tier ads - limit count for performance
         const pillarCount = Math.min(4, Math.floor(adRank / 2)); // Cap at 4 pillars (was 3-5)
         
@@ -280,8 +284,8 @@ export class IslandGenerator {
                 Math.sin(angle) * radius
             );
             
-            // Add to the island
-            islandData.mesh.add(pillar);
+            // Add the pillar to the island group
+            islandGroup.add(pillar);
         }
     }
 
@@ -328,7 +332,7 @@ export class IslandGenerator {
                 shapeType = 0; // Jagged for snow
                 break;
             case 'Swamp':
-                shapeType = 4; // Archipelago for swamp
+                shapeType = 4; // Unified archipelago-like shape for swamp
                 break;
             default:
                 shapeType = 1; // Default to smooth hill
@@ -357,7 +361,7 @@ export class IslandGenerator {
                 case 3: // Volcano - simplified
                     geometry = this.createVolcano(sizeGroup, random);
                     break;
-                case 4: // Archipelago - simplified
+                case 4: // Unified archipelago-like shape
                     geometry = this.createArchipelago(sizeGroup, random);
                     break;
                 default:
@@ -528,144 +532,63 @@ export class IslandGenerator {
     }
 
     private createArchipelago(size: number, random: (min: number, max: number) => number): THREE.BufferGeometry {
-        // Create a group of small islands clustered together
+        // Instead of creating multiple separate islands, create one unified island with varied terrain
         const baseRadius = size;
-        const mainIslandSize = size * 0.7;
+        const height = size * random(0.6, 0.8);
         
-        // Reduce number of islands for better performance
-        const islandCount = Math.floor(random(2, 4)); // Reduced from 3-6 to 2-4
+        // Create a base island geometry with moderate complexity
+        const segments = Math.max(8, Math.floor(size));
+        const heightSegments = Math.max(2, Math.floor(size/4));
         
-        // Create base disc for the entire area - with reduced segments
-        const baseGeometry = new THREE.CylinderGeometry(
-            0, baseRadius * 0.3, mainIslandSize * 0.3, 
-            Math.max(6, Math.floor(size * 0.7)), // Reduce segments for performance
-            1, false
+        // Create a single island with varied surface
+        const geometry = new THREE.CylinderGeometry(
+            size * 0.3, // Top radius - not pointed
+            baseRadius, // Bottom radius
+            height,
+            segments,
+            heightSegments,
+            false
         );
         
-        // Collect geometries for merging
-        const geometries = [baseGeometry];
+        // Apply varied height to create the appearance of multiple connected landmasses
+        const positionAttribute = geometry.getAttribute('position');
+        const vertex = new THREE.Vector3();
         
-        // Additional islands
-        for (let i = 0; i < islandCount; i++) {
-            // Random position within the base radius
-            const angle = random(0, Math.PI * 2);
-            const distance = random(0.3, 0.9) * baseRadius;
-            const x = Math.cos(angle) * distance;
-            const z = Math.sin(angle) * distance;
+        // Process vertices to create a varied surface
+        for (let i = 0; i < positionAttribute.count; i++) {
+            vertex.fromBufferAttribute(positionAttribute, i);
             
-            // Random island size - smaller than main
-            const islandSize = random(0.2, 0.5) * mainIslandSize;
-            const islandHeight = random(0.4, 0.7) * mainIslandSize;
+            // Skip bottom vertices
+            if (Math.abs(vertex.y + height/2) < 0.001) continue;
             
-            // Create small island with reduced segments
-            const islandGeometry = new THREE.CylinderGeometry(
-                0, islandSize, islandHeight, 
-                Math.max(5, Math.floor(islandSize * 1.5)), // Scale segments with island size
-                1, false
-            );
+            // Calculate distance from center axis
+            const distFromCenter = Math.sqrt(vertex.x * vertex.x + vertex.z * vertex.z);
+            const normalizedDist = distFromCenter / baseRadius;
             
-            // Position it
-            const positionAttribute = islandGeometry.getAttribute('position');
-            const vertex = new THREE.Vector3();
+            // Create waves in the surface
+            const angle = Math.atan2(vertex.z, vertex.x);
+            const wave = Math.sin(angle * 3) * Math.cos(angle * 2) * random(0.8, 1.2);
             
-            for (let j = 0; j < positionAttribute.count; j++) {
-                vertex.fromBufferAttribute(positionAttribute, j);
+            // Apply more height variation to create the appearance of separate peaks
+            if (vertex.y > -height/4) {
+                // Create dips and peaks
+                const heightMod = size * 0.15 * wave * (1 - normalizedDist);
+                vertex.y += heightMod;
                 
-                // Translate to island position
-                vertex.x += x;
-                vertex.z += z;
-                
-                // Save back
-                positionAttribute.setXYZ(j, vertex.x, vertex.y, vertex.z);
+                // Also vary the radius slightly
+                const radiusMod = random(0.9, 1.1) * size * 0.1 * wave;
+                const newRadius = distFromCenter + radiusMod;
+                vertex.x = (vertex.x / distFromCenter) * newRadius;
+                vertex.z = (vertex.z / distFromCenter) * newRadius;
             }
             
-            // Add to collection for merging
-            geometries.push(islandGeometry);
+            // Update position
+            positionAttribute.setXYZ(i, vertex.x, vertex.y, vertex.z);
         }
         
-        // Merge all geometries using BufferGeometryUtils
-        try {
-            const mergedGeometry = BufferGeometryUtils.mergeGeometries(geometries);
-            
-            // Apply minimal noise to all vertices for natural look - reduce computational intensity
-            const positionAttribute = mergedGeometry.getAttribute('position');
-            const vertex = new THREE.Vector3();
-            
-            // Check if we have a valid position attribute
-            if (!positionAttribute) {
-                console.error("Missing position attribute in merged geometry");
-                // Return a simple fallback geometry
-                return new THREE.CylinderGeometry(0, baseRadius, baseRadius * 0.7, 8);
-            }
-            
-            // Only apply noise to a subset of vertices for performance
-            for (let i = 0; i < positionAttribute.count; i++) {
-                // Apply noise to every third vertex for performance
-                if (i % 3 !== 0) continue;
-                
-                vertex.fromBufferAttribute(positionAttribute, i);
-                
-                // Skip vertices at the bottom plane
-                if (Math.abs(vertex.y + mainIslandSize*0.15) < 0.001) continue;
-                
-                // Add small noise for natural look - with safety checks
-                const noiseX = random(-0.1, 0.1) * size * 0.8;
-                const noiseY = random(-0.05, 0.05) * size * 0.5;
-                const noiseZ = random(-0.1, 0.1) * size * 0.8;
-                
-                // Check for NaN values
-                if (!isNaN(noiseX) && !isNaN(noiseY) && !isNaN(noiseZ)) {
-                    vertex.x += noiseX;
-                    vertex.y += noiseY;
-                    vertex.z += noiseZ;
-                }
-                
-                // Final NaN safety check
-                if (isNaN(vertex.x) || isNaN(vertex.y) || isNaN(vertex.z)) {
-                    console.error("NaN detected in vertex position, using original position");
-                    vertex.fromBufferAttribute(positionAttribute, i);
-                }
-                
-                // Update position
-                positionAttribute.setXYZ(i, vertex.x, vertex.y, vertex.z);
-            }
-            
-            // Validate the merged geometry before computing normals
-            let hasNaN = false;
-            for (let i = 0; i < positionAttribute.count; i++) {
-                const x = positionAttribute.getX(i);
-                const y = positionAttribute.getY(i);
-                const z = positionAttribute.getZ(i);
-                
-                if (isNaN(x) || isNaN(y) || isNaN(z)) {
-                    console.error(`NaN detected in position ${i}: (${x}, ${y}, ${z})`);
-                    hasNaN = true;
-                    
-                    // Fix NaN value to prevent errors
-                    positionAttribute.setXYZ(i, 0, 0, 0);
-                }
-            }
-            
-            if (hasNaN) {
-                console.warn("Fixed NaN values in geometry positions");
-            }
-            
-            // Update geometry
-            mergedGeometry.computeVertexNormals();
-            
-            // Explicitly compute bounding sphere to ensure it's valid
-            mergedGeometry.computeBoundingSphere();
-            if (isNaN(mergedGeometry.boundingSphere!.radius)) {
-                console.error("Invalid bounding sphere radius, creating fallback geometry");
-                return new THREE.CylinderGeometry(0, baseRadius, baseRadius * 0.7, 8);
-            }
-            
-            return mergedGeometry;
-        } catch (error) {
-            console.error("Error creating archipelago geometry:", error);
-            // Return a simple fallback geometry
-            return new THREE.CylinderGeometry(0, baseRadius, baseRadius * 0.7, 8);
-        }
+        // Compute normals for lighting
+        geometry.computeVertexNormals();
+        return geometry;
     }
 
     // Add a texture cache for billboards
@@ -792,7 +715,24 @@ export class IslandGenerator {
     }
 
     // Add a helper method to validate mesh geometry
-    private validateMeshGeometry(mesh: THREE.Mesh): boolean {
+    private validateMeshGeometry(mesh: THREE.Mesh | THREE.Group): boolean {
+        if (mesh instanceof THREE.Group) {
+            // For groups, validate the first mesh found within the group
+            let isValid = false;
+            mesh.traverse((child) => {
+                if (child instanceof THREE.Mesh && !isValid) {
+                    isValid = this.validateSingleMeshGeometry(child);
+                }
+            });
+            return isValid;
+        } else {
+            // For individual meshes
+            return this.validateSingleMeshGeometry(mesh);
+        }
+    }
+    
+    // Helper method to validate a single mesh's geometry
+    private validateSingleMeshGeometry(mesh: THREE.Mesh): boolean {
         if (!mesh.geometry || !mesh.geometry.getAttribute('position')) {
             return false;
         }

@@ -18,7 +18,7 @@ export interface IslandData {
     size: number;
     name: string | null;
     chunk: string; // Chunk key
-    mesh?: THREE.Mesh; // Optional mesh reference
+    mesh?: THREE.Mesh | THREE.Group; // Can be either a Mesh or a Group containing multiple meshes
     label?: HTMLDivElement; // Optional label reference
     outdoor?: {
         image: string;

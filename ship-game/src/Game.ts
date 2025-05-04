@@ -5,6 +5,7 @@ import { BIOMES, CAMERA_LERP_FACTOR, CAMERA_OFFSET, CHUNK_SIZE, ISLANDS_PER_CHUN
 import { ShipController } from './ShipController';
 import { IslandGenerator } from './IslandGenerator';
 import { Ship } from './Ship';
+import { ChunkManager } from './ChunkManager';
 
 export class Game {
     private scene: THREE.Scene;
@@ -18,11 +19,9 @@ export class Game {
     private shipController: ShipController | null = null;
     private islandGenerator: IslandGenerator;
     private shipInstance: Ship | null = null;
+    private chunkManager: ChunkManager;
 
     private playerName: string = '';
-
-    // Chunk management related
-    private loadedChunks: Set<string> = new Set();
 
     // Add property for water mesh
     private waterMesh: THREE.Mesh | null = null;
@@ -31,22 +30,10 @@ export class Game {
     private raycaster = new THREE.Raycaster();
     private mouse = new THREE.Vector2();
 
-    private chunkUpdateCounter: number = 0;
-
     // Add this property in the class
     private animationFrame: number = 0;
 
-    // Add this property to the Game class
-    private pendingChunks: string[] = [];
-    private isGeneratingChunk: boolean = false;
-
-    // Add these properties to further optimize performance
-    private activelyGenerating: boolean = false;
-    private lowDetailDistance: number = VIEW_DISTANCE;
-    private highDetailDistance: number = 1;
-    private lowPolyIslands: Map<string, THREE.Object3D> = new Map();
-
-    // Add these event handler properties at class level
+    // These event handler properties at class level
     private onResize = (): void => {
         if (this.camera && this.renderer) {
             this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -106,6 +93,9 @@ export class Game {
         
         // Initialize island generator
         this.islandGenerator = new IslandGenerator(this.scene);
+
+        // Initialize chunk manager
+        this.chunkManager = new ChunkManager(this.scene, this.dataManager, this.islandGenerator);
         
         // Initialize the game
         this.init();
@@ -161,9 +151,6 @@ export class Game {
         // Setup raycaster for outdoor billboards interaction
         this.setupRaycaster();
         
-        // Initial Chunk Load
-        this.updateChunks();
-        
         // Start Animation Loop
         this.animate();
     }
@@ -216,447 +203,7 @@ export class Game {
     }
 
     private getChunkKey(x: number, z: number): string {
-        return `${Math.floor(x / CHUNK_SIZE)}_${Math.floor(z / CHUNK_SIZE)}`;
-    }
-
-    private updateChunks(): void {
-        if (!this.playerShip) return;
-
-        // Get current chunk coordinates
-        const currentChunkX = Math.floor(this.playerShip.position.x / CHUNK_SIZE);
-        const currentChunkZ = Math.floor(this.playerShip.position.z / CHUNK_SIZE);
-
-        // Track needed chunks by detail level
-        const highDetailChunks = new Set<string>();
-        const lowDetailChunks = new Set<string>();
-        const visibleIslandIds = new Set<string>();
-
-        // Track high detail chunks (close to player)
-        for (let dx = -this.highDetailDistance; dx <= this.highDetailDistance; dx++) {
-            for (let dz = -this.highDetailDistance; dz <= this.highDetailDistance; dz++) {
-                const chunkX = currentChunkX + dx;
-                const chunkZ = currentChunkZ + dz;
-                const key = `${chunkX}_${chunkZ}`;
-                
-                highDetailChunks.add(key);
-                lowDetailChunks.add(key); // High detail chunks are also in low detail set
-                
-                // Queue chunk generation if not already generated
-                if (!this.dataManager.generatedChunks.has(key) && !this.pendingChunks.includes(key)) {
-                    this.pendingChunks.push(key);
-                }
-            }
-        }
-        
-        // Add low detail chunks (further from player)
-        for (let dx = -this.lowDetailDistance; dx <= this.lowDetailDistance; dx++) {
-            for (let dz = -this.lowDetailDistance; dz <= this.lowDetailDistance; dz++) {
-                // Skip high detail chunks which are already added
-                if (Math.abs(dx) <= this.highDetailDistance && Math.abs(dz) <= this.highDetailDistance) continue;
-                
-                const chunkX = currentChunkX + dx;
-                const chunkZ = currentChunkZ + dz;
-                const key = `${chunkX}_${chunkZ}`;
-                
-                lowDetailChunks.add(key);
-                
-                // Queue with lower priority if not generated
-                if (!this.dataManager.generatedChunks.has(key) && !this.pendingChunks.includes(key)) {
-                    this.pendingChunks.push(key);
-                }
-                
-                // If chunk isn't loaded yet but player is approaching it, 
-                // add a low-poly placeholder immediately for better visual experience
-                if (!this.loadedChunks.has(key) && !this.dataManager.generatedChunks.has(key)) {
-                    this.createPlaceholdersForChunk(chunkX, chunkZ, key);
-                }
-            }
-        }
-
-        // Load high-detail chunks
-        for (const key of highDetailChunks) {
-            if (!this.loadedChunks.has(key) && this.dataManager.generatedChunks.has(key)) {
-                // Add islands from this chunk with full detail
-                Object.values(this.dataManager.islandData)
-                      .filter(island => island.chunk === key)
-                      .forEach(island => {
-                          this.addIslandMesh(island);
-                          visibleIslandIds.add(island.id);
-                          
-                          // Remove any placeholder that might exist
-                          const placeholderId = `placeholder_${island.id}`;
-                          if (this.lowPolyIslands.has(placeholderId)) {
-                              const placeholder = this.lowPolyIslands.get(placeholderId);
-                              if (placeholder) {
-                                  this.scene.remove(placeholder);
-                                  this.lowPolyIslands.delete(placeholderId);
-                              }
-                          }
-                      });
-                      
-                this.loadedChunks.add(key);
-            } else if (this.loadedChunks.has(key)) {
-                // Track visible islands in already loaded chunks
-                Object.values(this.dataManager.islandData)
-                      .filter(island => island.chunk === key)
-                      .forEach(island => {
-                          visibleIslandIds.add(island.id);
-                      });
-            }
-        }
-
-        // Unload chunks that are too far away
-        for (const key of [...this.loadedChunks]) {
-            if (!lowDetailChunks.has(key)) {
-                // Remove islands from this chunk
-                this.unloadChunk(key);
-            } else if (!highDetailChunks.has(key)) {
-                // Optionally downgrade to low detail
-                // This is where you could swap high-detail models for low-detail ones
-            }
-        }
-        
-        // Process one pending chunk per frame to spread out the load
-        this.processNextPendingChunk();
-        
-        // Periodically clear caches to prevent memory leaks
-        this.chunkUpdateCounter++;
-        if (this.chunkUpdateCounter > 50) { // Every ~50 chunk updates
-            this.islandGenerator.clearUnusedCaches(visibleIslandIds);
-            this.chunkUpdateCounter = 0;
-        }
-    }
-
-    // Add a method to create temporary placeholders until real chunks are generated
-    private createPlaceholdersForChunk(chunkX: number, chunkZ: number, chunkKey: string): void {
-        // Create 1-3 placeholder islands to provide immediate visual feedback
-        const islandCount = Math.min(3, 1 + Math.floor(Math.random() * 2));
-        
-        for (let i = 0; i < islandCount; i++) {
-            // Generate consistent positions using chunk key
-            const posX = chunkX * CHUNK_SIZE + ((chunkX + i) % CHUNK_SIZE) * 0.7;
-            const posZ = chunkZ * CHUNK_SIZE + ((chunkZ + i) % CHUNK_SIZE) * 0.7;
-            
-            // Choose biome based on position
-            const biomeIndex = Math.abs(chunkX + chunkZ + i) % BIOMES.length;
-            const biome = BIOMES[biomeIndex].name;
-            
-            // Create a placeholder ID that won't conflict with real islands
-            const placeholderId = `placeholder_${chunkKey}_${i}`;
-            
-            // If already created, skip
-            if (this.lowPolyIslands.has(placeholderId)) continue;
-            
-            // Create simple placeholder
-            const size = 5 + Math.random() * 5; // Simplified size range
-            const placeholder = this.createLowPolyPlaceholder({x: posX, z: posZ}, size, biome);
-            
-            // Add placeholder to scene
-            this.scene.add(placeholder);
-            
-            // Store for later removal
-            this.lowPolyIslands.set(placeholderId, placeholder);
-        }
-    }
-
-    // Optimize the chunk processing for better concurrent generation
-    private processNextPendingChunk(): void {
-        // If already generating or no pending chunks, exit
-        if (this.isGeneratingChunk || this.pendingChunks.length === 0) return;
-        
-        // Set flag to prevent multiple simultaneous generations
-        this.isGeneratingChunk = true;
-        
-        // Process chunks from front of queue (nearest to player)
-        const chunkKey = this.pendingChunks.shift();
-        if (!chunkKey) {
-            this.isGeneratingChunk = false;
-            return;
-        }
-        
-        // Extract chunk coordinates
-        const [chunkXStr, chunkZStr] = chunkKey.split('_');
-        const chunkX = parseInt(chunkXStr);
-        const chunkZ = parseInt(chunkZStr);
-        
-        // Calculate chunk priority based on distance to player
-        const playerChunkX = Math.floor(this.playerShip!.position.x / CHUNK_SIZE);
-        const playerChunkZ = Math.floor(this.playerShip!.position.z / CHUNK_SIZE);
-        const distanceToPlayer = Math.abs(chunkX - playerChunkX) + Math.abs(chunkZ - playerChunkZ);
-        
-        // Use different timeout based on distance - process nearby chunks faster
-        const delay = distanceToPlayer <= this.highDetailDistance ? 0 : 100; 
-        
-        // Defer the actual generation to prevent UI freezing
-        setTimeout(() => {
-            try {
-                // Generate with optimized settings based on distance
-                this.generateChunk(chunkX, chunkZ, distanceToPlayer <= this.highDetailDistance);
-                
-                // If this was a high priority chunk, load it immediately
-                if (distanceToPlayer <= this.highDetailDistance) {
-                    const key = `${chunkX}_${chunkZ}`;
-                    if (!this.loadedChunks.has(key)) {
-                        this.loadChunk(key);
-                    }
-                }
-            } catch (error) {
-                console.error(`Error generating chunk ${chunkKey}:`, error);
-            } finally {
-                this.isGeneratingChunk = false;
-            }
-        }, delay);
-    }
-
-    // Modify the generateChunk method to accept a detail level parameter
-    private generateChunk(chunkX: number, chunkZ: number, highDetail: boolean = true): void {
-        const key = `${chunkX}_${chunkZ}`;
-        if (this.dataManager.generatedChunks.has(key)) return;
-        
-        // Reduce calculations when generating low-detail chunks
-        const seedFunction = highDetail ? this.getDetailedSeedRandom(key) : this.getSimpleSeedRandom(key);
-        
-        // Optimize for performance - calculate once and reuse
-        const distanceFromOrigin = Math.sqrt(chunkX * chunkX + chunkZ * chunkZ);
-        const isStartingArea = distanceFromOrigin <= STARTING_AREA_RADIUS;
-        
-        // Optimize island count calculation - use fewer islands in low detail mode
-        const minIslands = highDetail ? ISLANDS_PER_CHUNK.min : Math.max(1, ISLANDS_PER_CHUNK.min - 1);
-        const maxIslands = highDetail ? ISLANDS_PER_CHUNK.max : Math.max(2, ISLANDS_PER_CHUNK.max - 2);
-        const islandCount = Math.floor(seedFunction(minIslands, maxIslands + 0.99));
-        
-        // Track positions of ad islands to ensure they're spread out
-        const adIslandPositions: Array<{x: number, z: number}> = [];
-        
-        // Limit ads per chunk to reduce ad density
-        let adIslandsCreated = 0;
-        
-        // Generate islands for the chunk
-        for (let i = 0; i < islandCount; i++) {
-            // Use seeded random functions for consistent island placement
-            const posX = chunkX * CHUNK_SIZE + seedFunction(0, CHUNK_SIZE, `posX_${i}`);
-            const posZ = chunkZ * CHUNK_SIZE + seedFunction(0, CHUNK_SIZE, `posZ_${i}`);
-            
-            // Simplified size calculation for faster generation
-            let size = seedFunction(ISLAND_SIZE_RANGE.min, ISLAND_SIZE_RANGE.max, `size_${i}`);
-            
-            // More efficient biome selection
-            let biomeIndex = Math.floor(seedFunction(0, BIOMES.length, `biome_${i}`));
-            let biome = BIOMES[biomeIndex].name;
-            
-            // Streamlined ad island check
-            let canBeAdIsland = adIslandsCreated < MAX_ADS_PER_CHUNK;
-            
-            // Simpler distance check for ad islands
-            if (canBeAdIsland && adIslandPositions.length > 0) {
-                for (const adPos of adIslandPositions) {
-                    const distanceSquared = (posX - adPos.x)**2 + (posZ - adPos.z)**2;
-                    // Using squared distance to avoid square root calculation
-                    if (distanceSquared < (CHUNK_SIZE/3)**2) {
-                        canBeAdIsland = false;
-                        break;
-                    }
-                }
-            }
-            
-            // Ad chance calculation - reduced complexity
-            let adChance = AD_SPAWN_CHANCE;
-            if (isStartingArea) adChance *= STARTING_CHUNK_AD_BOOST;
-            
-            // Consistent ad determination
-            const adRandom = seedFunction(0, 1, `adRoll_${i}`);
-            const hasOutdoor = canBeAdIsland && adRandom < adChance;
-            
-            if (hasOutdoor) {
-                let adTierIndex;
-                
-                // Simplified ad tier selection
-                if (isStartingArea) {
-                    adTierIndex = Math.min(
-                        AD_RANK_TIERS.length - 1, 
-                        Math.floor(seedFunction(0, AD_RANK_TIERS.length, `adTier_${i}`) * 0.7 + 1)
-                    );
-                } else {
-                    adTierIndex = Math.floor(seedFunction(0, AD_RANK_TIERS.length, `adTier_${i}`));
-                }
-                
-                const adTier = AD_RANK_TIERS[adTierIndex];
-                size *= adTier.sizeBoost;
-                
-                // Simplified biome selection for ads
-                biome = seedFunction(0, 1, `adBiomeType_${i}`) < 0.5 ? 'Desert' : 'Volcano';
-                
-                // Create island data with this enhanced configuration
-                const islandData: IslandData = {
-                    id: `ad_island_${chunkX}_${chunkZ}_${i}_rank${adTier.rank}`,
-                    pos: { x: posX, y: 0, z: posZ },
-                    biome,
-                    size,
-                    name: null,
-                    chunk: key
-                };
-                
-                // Add outdoor data with rank information - reuse images for better caching
-                const adIndex = 1 + Math.min(5, Math.floor(seedFunction(0, 6, `adImage_${i}`)));
-                islandData.outdoor = {
-                    image: `https://picsum.photos/seed/${adIndex}/300/200`,
-                    url: `https://example.com/ad/${adIndex}_tier_${adTier.name}`,
-                    active: true,
-                    adRank: adTier.rank
-                };
-                
-                adIslandPositions.push({x: posX, z: posZ});
-                adIslandsCreated++;
-                
-                // Store the island data
-                this.dataManager.islandData[islandData.id] = islandData;
-            } else {
-                // Create regular island data
-                const islandData: IslandData = {
-                    id: `island_${chunkX}_${chunkZ}_${i}`,
-                    pos: { x: posX, y: 0, z: posZ },
-                    biome,
-                    size,
-                    name: null,
-                    chunk: key
-                };
-                
-                // Store the island data
-                this.dataManager.islandData[islandData.id] = islandData;
-            }
-        }
-        
-        // Mark chunk as generated
-        this.dataManager.generatedChunks.add(key);
-        
-        // Remove any placeholders that were created for this chunk
-        this.removePlaceholdersForChunk(key);
-        
-        // Save data to persist between sessions - but don't save too frequently
-        if (Math.random() < 0.2) { // Only save ~20% of the time to improve performance
-            this.dataManager.saveData();
-        }
-    }
-
-    // Simple method to remove placeholders when real chunk is generated
-    private removePlaceholdersForChunk(chunkKey: string): void {
-        // Find and remove all placeholders for this chunk
-        for (const [id, placeholder] of this.lowPolyIslands.entries()) {
-            if (id.startsWith(`placeholder_${chunkKey}`)) {
-                this.scene.remove(placeholder);
-                this.lowPolyIslands.delete(id);
-            }
-        }
-    }
-
-    // Add optimized seeded random functions
-    private getDetailedSeedRandom(key: string): (min: number, max: number, salt?: string) => number {
-        return (min: number, max: number, salt: string = "") => {
-            try {
-                const combinedSeed = key + salt + min.toString() + max.toString();
-                const hash = this.simpleHash(combinedSeed);
-                const val = (hash % 1000) / 1000;
-                return min + Math.abs(val) * (max - min);
-            } catch (error) {
-                return min + Math.random() * (max - min);
-            }
-        };
-    }
-
-    private getSimpleSeedRandom(key: string): (min: number, max: number, salt?: string) => number {
-        return (min: number, max: number, salt: string = "") => {
-            try {
-                // Faster calculation for low-detail chunks
-                const hash = this.simpleHash(key + salt);
-                return min + (hash % 100) / 100 * (max - min);
-            } catch (error) {
-                return min + Math.random() * (max - min);
-            }
-        };
-    }
-
-    // Simple fast hashing function
-    private simpleHash(str: string): number {
-        let hash = 0;
-        if (str.length === 0) return hash;
-        
-        for (let i = 0; i < Math.min(str.length, 10); i++) {
-            hash = ((hash << 5) - hash) + str.charCodeAt(i);
-            hash = hash & hash; // Convert to 32bit integer
-        }
-        
-        return Math.abs(hash);
-    }
-
-    private loadChunk(key: string): void {
-        if (this.loadedChunks.has(key)) return;
-        console.log(`Loading chunk: ${key}`);
-        this.loadedChunks.add(key);
-        Object.values(this.dataManager.islandData)
-              .filter(island => island.chunk === key)
-              .forEach(island => this.addIslandMesh(island));
-    }
-
-    private unloadChunk(key: string): void {
-        if (!this.loadedChunks.has(key)) return;
-         console.log(`Unloading chunk: ${key}`);
-        this.loadedChunks.delete(key);
-        Object.values(this.dataManager.islandData)
-              .filter(island => island.chunk === key)
-              .forEach(island => this.removeIslandMesh(island));
-    }
-
-    private addIslandMesh(islandData: IslandData): void {
-        // Use the island generator to add the island mesh
-        this.islandGenerator.addIslandMesh(islandData);
-        
-        // Create label if the island has a name
-        if (islandData.name) {
-            this.createIslandLabel(islandData);
-        }
-    }
-
-    private removeIslandMesh(islandData: IslandData): void {
-        // Use the island generator to remove the island mesh
-        this.islandGenerator.removeIslandMesh(islandData);
-        
-        // Clean up label
-        if (islandData.label) {
-            islandData.label.remove();
-            delete islandData.label;
-        }
-    }
-
-    private createIslandLabel(islandData: IslandData): void {
-        // Don't create label if it already exists
-        if (islandData.label) return;
-        
-        try {
-            // Make sure we have the container
-            const container = document.getElementById('islandLabels');
-            if (!container) {
-                console.warn("Island labels container not found");
-                return;
-            }
-            
-            // Create the label exactly as in the original code
-            const div = document.createElement('div');
-            div.className = 'island-label';
-            div.innerText = islandData.name || '';
-            
-            // Force the element to have a style by setting display
-            div.style.display = 'none';
-            
-            // Add to container
-            container.appendChild(div);
-            
-            // Store reference to the label in island data
-            islandData.label = div;
-            
-            console.log(`Created label for island ${islandData.id} with name ${islandData.name}`);
-        } catch (error) {
-            console.error("Error creating island label:", error);
-        }
+        return this.chunkManager.getChunkKey(x, z);
     }
 
     private updateLabels(): void {
@@ -745,9 +292,11 @@ export class Game {
                         island.name = newName;
                         this.dataManager.saveData();
                         
-                        // Recreate the island mesh and label - exactly like original
-                        this.removeIslandMesh(island);
-                        this.addIslandMesh(island);
+                        // Update the island in the chunk manager 
+                        if (island.mesh) {
+                            this.chunkManager.removeIslandMesh(island);
+                        }
+                        this.chunkManager.addIslandMesh(island);
                     }
                 }
             } catch (error) {
@@ -798,7 +347,9 @@ export class Game {
         this.updateCamera();
         
         // Update island loading based on player position
-        this.updateChunks();
+        if (this.playerShip) {
+            this.chunkManager.updateChunks(this.playerShip.position);
+        }
         
         // Update water position to follow player
         this.updateWater();
@@ -899,20 +450,10 @@ export class Game {
         // Save data before disposing
         this.dataManager.saveData();
         
-        // Clean up all island meshes
-        Object.values(this.dataManager.islandData).forEach(island => {
-            if (island.mesh) {
-                this.islandGenerator.removeIslandMesh(island);
-            }
-            
-            // Also remove any labels
-            if (island.label && island.label.parentNode) {
-                island.label.parentNode.removeChild(island.label);
-                delete island.label;
-            }
-        });
+        // Use the chunk manager to clean up chunks
+        this.chunkManager.dispose();
         
-        // Clear cached geometries and textures
+        // Clean up cached geometries and textures
         this.islandGenerator.dispose();
         
         // Dispose ShipController if it exists
@@ -1079,54 +620,7 @@ export class Game {
     private checkForAdIslandProximity(): void {
         if (!this.playerShip) return;
         
-        // Check all islands with outdoor advertisements
-        Object.values(this.dataManager.islandData)
-            .filter(island => island.outdoor && island.outdoor.active)
-            .forEach(island => {
-                // Calculate distance to player
-                const dx = island.pos.x - this.playerShip!.position.x;
-                const dz = island.pos.z - this.playerShip!.position.z;
-                const distance = Math.hypot(dx, dz);
-                
-                // If player is close enough to the ad island, trigger the URL redirection
-                if (distance < AD_INTERACTION_DISTANCE) {
-                    // Only redirect if not recently redirected (to prevent spam)
-                    if (!island.outdoor!.lastInteractionTime || 
-                        Date.now() - island.outdoor!.lastInteractionTime > 10000) { // 10 second cooldown
-                        
-                        console.log(`Player close to ad island ${island.id}, opening URL: ${island.outdoor!.url}`);
-                        
-                        // Ask user before redirecting
-                        const willRedirect = confirm(`Visit advertisement: ${island.outdoor!.url}?`);
-                        
-                        if (willRedirect) {
-                            // Open URL in a new tab
-                            window.open(island.outdoor!.url, '_blank');
-                        }
-                        
-                        // Update last interaction time
-                        island.outdoor!.lastInteractionTime = Date.now();
-                    }
-                }
-            });
-    }
-
-    // Add a method to create a simple low-poly placeholder island
-    private createLowPolyPlaceholder(position: { x: number, z: number }, size: number, biome: string): THREE.Object3D {
-        // Create a very simple cone shape
-        const geometry = new THREE.CylinderGeometry(0, size, size * 0.6, 6, 1);
-        const material = new THREE.MeshBasicMaterial({ color: this.getBiomeColor(biome) });
-        const mesh = new THREE.Mesh(geometry, material);
-        
-        // Position at water level
-        mesh.position.set(position.x, 0, position.z);
-        
-        return mesh;
-    }
-
-    // Helper to get a biome color
-    private getBiomeColor(biomeName: string): number {
-        const biome = BIOMES.find(b => b.name === biomeName);
-        return biome ? biome.color : 0x00FF00; // Default to green if not found
+        // Delegate to chunk manager
+        this.chunkManager.checkForAdIslandProximity(this.playerShip.position);
     }
 }
